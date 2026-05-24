@@ -325,7 +325,7 @@ const memoryLanceDBProPlugin = {
         migrator,
         embedder,
       }),
-      { commands: ["memory"] }
+      { commands: ["memx"] }
     );
 
     // ========================================================================
@@ -551,7 +551,7 @@ const memoryLanceDBProPlugin = {
         } catch (err) {
           api.logger.warn(`session-memory: failed to save: ${String(err)}`);
         }
-      });
+      }, { name: "memory-lancedb-pro:session-memory" }); // name required by openclaw >=2026.5 registerHook contract
 
       api.logger.info("session-memory: hook registered for command:new");
     }

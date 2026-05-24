@@ -41,8 +41,8 @@ function formatJson(obj: any): string {
 
 export function registerMemoryCLI(program: Command, context: CLIContext): void {
   const memory = program
-    .command("memory")
-    .description("Enhanced memory management commands");
+    .command("memx")
+    .description("Enhanced memory management commands (memory-lancedb-pro)");
 
   // List memories
   memory
@@ -607,5 +607,11 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
 // ============================================================================
 
 export function createMemoryCLI(context: CLIContext) {
-  return (program: Command) => registerMemoryCLI(program, context);
+  // OpenClaw >=2026.5 invokes the CLI registrar with a context object
+  // ({ program, config, workspaceDir, logger }); older versions passed the
+  // commander Command directly. Support both by unwrapping ctx.program.
+  return (ctx: { program?: Command } | Command) => {
+    const program = (ctx as { program?: Command }).program ?? (ctx as Command);
+    registerMemoryCLI(program, context);
+  };
 }

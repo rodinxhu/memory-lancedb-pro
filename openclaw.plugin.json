@@ -4,6 +4,16 @@
   "description": "Enhanced LanceDB-backed long-term memory with hybrid retrieval, multi-scope isolation, and management CLI",
   "version": "2026.2.16",
   "kind": "memory",
+  "contracts": {
+    "tools": [
+      "memory_recall",
+      "memory_store",
+      "memory_forget",
+      "memory_update",
+      "memory_stats",
+      "memory_list"
+    ]
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
