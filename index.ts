@@ -565,7 +565,11 @@ const memoryLanceDBProPlugin = {
 
     async function runBackup() {
       try {
-        const backupDir = api.resolvePath(join(resolvedDbPath, "..", "backups"));
+        // resolvedDbPath is already an absolute, resolved path; the default is
+        // also absolute. Avoid re-running api.resolvePath here — in the deferred
+        // service context it could yield undefined and throw ERR_INVALID_ARG_TYPE.
+        const dbPath = resolvedDbPath || getDefaultDbPath();
+        const backupDir = join(dbPath, "..", "backups");
         await mkdir(backupDir, { recursive: true });
 
         const allMemories = await store.list(undefined, undefined, 10000, 0);
