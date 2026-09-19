@@ -31,6 +31,11 @@ const BOILERPLATE_PATTERNS = [
   /^fresh session/i,
   /^new session/i,
   /^HEARTBEAT/i,
+  // Gateway-generated prompts, not user turns. Without these, broad capture
+  // stores every liveness ping and scheduled-job prompt as a "memory".
+  /^\[OpenClaw heartbeat poll\]/i,
+  /^\[cron:/i,
+  /^\[(system|queued)/i,
 ];
 
 export interface NoiseFilterOptions {
