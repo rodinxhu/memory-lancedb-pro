@@ -291,13 +291,22 @@ export interface PromotionCandidate {
 export async function findPromotionCandidates(
   store: MemoryStore,
   agentId: string,
-  options: { lookbackDays?: number; minClusterSize?: number; similarityThreshold?: number; maxCandidates?: number } = {}
+  options: {
+    lookbackDays?: number;
+    minClusterSize?: number;
+    similarityThreshold?: number;
+    maxCandidates?: number;
+    /** D5: distinct days a cluster must span to count as recurring (default 2). */
+    minSpanDays?: number;
+  } = {}
 ): Promise<PromotionCandidate[]> {
   const lookbackDays = options.lookbackDays ?? 14;
   const minClusterSize = options.minClusterSize ?? 3;
   // Normalized BM25 neighbor score required to join a cluster (0..1 sigmoid scale).
   const similarityThreshold = options.similarityThreshold ?? 0.5;
   const maxCandidates = options.maxCandidates ?? 5;
+  // D5: distinct days a cluster must touch before it counts as "recurring".
+  const minSpanDays = options.minSpanDays ?? 2;
 
   const scope = observationScope(agentId);
   const since = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
@@ -306,7 +315,10 @@ export async function findPromotionCandidates(
   // vectorSearch seeded by its own embedding-neighborhood: instead we cluster
   // by querying the store per observation. To keep this cheap we cap input.
   const recent = (await store.list([scope], undefined, 500, 0)).filter(
-    (m) => m.timestamp >= since && JSON.parse(m.metadata || "{}").promoted !== true
+    (m) =>
+      m.timestamp >= since &&
+      JSON.parse(m.metadata || "{}").promoted !== true &&
+      !isOperationalTurn(m.text)
   );
   if (recent.length < minClusterSize) return [];
 
@@ -328,6 +340,15 @@ export async function findPromotionCandidates(
       if (n.entry.id !== seed.id && n.entry.timestamp >= since) memberIds.add(n.entry.id);
     }
     if (memberIds.size >= minClusterSize) {
+      // D5: cluster size alone is not a quality signal. A run of smoke tests
+      // inside one session clusters beautifully and means nothing — verified
+      // live on 2026-09-20, when this function offered to promote a batch of
+      // test emails as durable memories. Require the cluster to actually
+      // recur across days.
+      const members = recent.filter((m) => memberIds.has(m.id));
+      const spanDays = clusterSpanDays(members);
+      if (spanDays < minSpanDays) continue;
+
       for (const id of memberIds) assigned.add(id);
       candidates.push({ text: seed.text, memberIds: [...memberIds], count: memberIds.size });
       if (candidates.length >= maxCandidates) break;
@@ -336,6 +357,34 @@ export async function findPromotionCandidates(
 
   return candidates.sort((a, b) => b.count - a.count);
 }
+
+/** Distinct calendar days (UTC) covered by a cluster's members. */
+function clusterSpanDays(members: Array<{ timestamp: number }>): number {
+  const days = new Set(members.map((m) => Math.floor(m.timestamp / 86_400_000)));
+  return days.size;
+}
+
+/**
+ * D5: turns that are us operating the machine, not facts about the user's world.
+ * Debugging sessions produce dense bursts of near-identical turns, which is
+ * exactly what the clustering rewards — so they must be excluded by hand.
+ */
+const OPERATIONAL_TURN_PATTERNS = [
+  /\b(smoke|drill|dry[- ]run)\b/i,
+  /\btest (email|message|alert|memory|run|turn)\b/i,
+  /\b(reply|respond) with exactly\b/i,
+  /\bexample-invalid-domain\b/i,
+  /\begress[- ]probe\b/i,
+  /\bHEARTBEAT|heartbeat poll\b/i,
+  /^\[?cron:/i,
+];
+
+export function isOperationalTurn(text: string): boolean {
+  // Only judge the user half; an assistant reply may legitimately discuss tests.
+  const userPart = text.split(/\nassistant:/)[0];
+  return OPERATIONAL_TURN_PATTERNS.some((r) => r.test(userPart));
+}
+
 
 // ============================================================================
 // Config parsing

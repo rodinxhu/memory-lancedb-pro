@@ -603,7 +603,11 @@ const memoryLanceDBProPlugin = {
               `</relevant-memories>`,
           };
         } catch (err) {
-          api.logger.warn(`memory-lancedb-pro: recall failed: ${String(err)}`);
+          // D1: error, not warn. In September 2026 this line fired every 15
+          // minutes for four days at warn level while the gateway reported
+          // itself healthy, and nobody saw it.
+          const msg = `memory-lancedb-pro: recall failed: ${String(err)}`;
+          api.logger.error?.(msg) ?? api.logger.warn(msg);
         }
       });
     }
@@ -989,6 +993,7 @@ const memoryLanceDBProPlugin = {
 
     let backupTimer: ReturnType<typeof setInterval> | null = null;
     let observationTimer: ReturnType<typeof setInterval> | null = null;
+    let writeAgeTimer: ReturnType<typeof setInterval> | null = null;
     let sessionIndexTimer: ReturnType<typeof setInterval> | null = null;
 
     // TM4: incremental transcript indexing (initial pass + periodic catch-up)
@@ -1005,6 +1010,55 @@ const memoryLanceDBProPlugin = {
       } catch (err) {
         api.logger.warn(`session-fts: ${label} indexing failed: ${String(err)}`);
       }
+    }
+
+    /**
+     * D1: write-path liveness.
+     *
+     * Curated memory writes stopped on 2026-08-24 and nobody noticed for a
+     * month, because no component tracked whether a write path was still
+     * producing. Age-since-last-write is the one number that would have caught
+     * it on day one, so report it at startup and daily, and escalate when a
+     * path that normally writes goes quiet.
+     */
+    const WRITE_PATH_QUIET_DAYS = 7;
+    async function reportWritePathAges() {
+      const stats = await store.stats();
+      const scopes = Object.keys(stats.scopeCounts);
+      const curated = scopes.filter((s) => !s.startsWith("observations:"));
+      const observed = scopes.filter((s) => s.startsWith("observations:"));
+
+      const newestIn = async (group: string[]): Promise<number | null> => {
+        let newest: number | null = null;
+        for (const scope of group) {
+          // list() is ordered newest-first, so one row per scope is enough.
+          const rows = await store.list([scope], undefined, 1, 0);
+          const ts = rows[0]?.timestamp;
+          if (typeof ts === "number" && (newest === null || ts > newest)) newest = ts;
+        }
+        return newest;
+      };
+
+      const days = (ts: number | null) =>
+        ts === null ? null : Math.floor((Date.now() - ts) / 86_400_000);
+
+      const curatedAge = days(await newestIn(curated));
+      const observedAge = days(await newestIn(observed));
+      const fmt = (d: number | null) => (d === null ? "never" : `${d}d ago`);
+
+      api.logger.info(
+        `memory-lancedb-pro: write-path liveness — curated: ${fmt(curatedAge)}, observations: ${fmt(observedAge)}`
+      );
+
+      for (const [label, age] of [["curated", curatedAge], ["observations", observedAge]] as const) {
+        if (age !== null && age > WRITE_PATH_QUIET_DAYS) {
+          const msg =
+            `memory-lancedb-pro: WRITE PATH QUIET — no ${label} memory written in ${age} days. ` +
+            `This is the signature of the August 2026 silent failure. Check the ${label} hook.`;
+          api.logger.error?.(msg) ?? api.logger.warn(msg);
+        }
+      }
+      return { curatedAge, observedAge };
     }
 
     // TM1: daily observation expiry across all observation scopes
@@ -1090,10 +1144,53 @@ const memoryLanceDBProPlugin = {
           );
 
           if (!embedTest.success) {
-            api.logger.warn(`memory-lancedb-pro: embedding test failed: ${embedTest.error}`);
+            api.logger.error?.(`memory-lancedb-pro: embedding test failed: ${embedTest.error}`)
+              ?? api.logger.warn(`memory-lancedb-pro: embedding test failed: ${embedTest.error}`);
           }
           if (!retrievalTest.success) {
-            api.logger.warn(`memory-lancedb-pro: retrieval test failed: ${retrievalTest.error}`);
+            api.logger.error?.(`memory-lancedb-pro: retrieval test failed: ${retrievalTest.error}`)
+              ?? api.logger.warn(`memory-lancedb-pro: retrieval test failed: ${retrievalTest.error}`);
+          }
+
+          // D1: the checks above only prove the components CONSTRUCT. The
+          // September 2026 outage passed them while every lookup returned
+          // nothing — corrupt indexes over an intact table. So run a real
+          // query and compare against the row count, because "no data" and
+          // "data but no retrieval" need completely different responses.
+          try {
+            const stats = await store.stats();
+            const rows = stats.totalCount ?? 0;
+            if (rows === 0) {
+              api.logger.warn("memory-lancedb-pro: store is EMPTY — recall will return nothing until memories are written");
+            } else {
+              const probe = await retriever.retrieve({
+                query: "project status update",
+                limit: 3,
+                scopeFilter: scopeManager.getAccessibleScopes("main"),
+              });
+              const hits = Array.isArray(probe) ? probe.length : 0;
+              if (hits === 0) {
+                const msg =
+                  `memory-lancedb-pro: INDEX FAULT — ${rows} memories stored but a live probe returned 0 results. ` +
+                  `Data is intact; retrieval is dead (usually a corrupt vector/FTS index, or an embedder ` +
+                  `dimension mismatch). Repair: workspace/shared/docs/memory-mechanism-and-2026-09-repairs.md`;
+                api.logger.error?.(msg) ?? api.logger.warn(msg);
+              } else {
+                api.logger.info(`memory-lancedb-pro: recall probe OK (${hits} hit(s) over ${rows} memories)`);
+              }
+            }
+          } catch (err) {
+            const msg = `memory-lancedb-pro: recall probe FAILED: ${String(err)}`;
+            api.logger.error?.(msg) ?? api.logger.warn(msg);
+          }
+
+          // D1: write-path liveness. A path that normally writes and then goes
+          // quiet is the signature of the August 2026 failure, which ran for a
+          // month because nothing tracked it.
+          try {
+            await reportWritePathAges();
+          } catch (err) {
+            api.logger.debug?.(`memory-lancedb-pro: write-age report failed: ${String(err)}`);
           }
 
           // Run initial backup after a short delay, then schedule daily
@@ -1103,6 +1200,14 @@ const memoryLanceDBProPlugin = {
           // TM1: observation expiry — shortly after start, then daily
           setTimeout(() => runObservationMaintenance(), 120_000); // 2 min after start
           observationTimer = setInterval(() => runObservationMaintenance(), BACKUP_INTERVAL_MS);
+
+          // D1: re-check write-path liveness daily, not only at startup — a
+          // long-running gateway would otherwise never notice a path dying.
+          writeAgeTimer = setInterval(() => {
+            reportWritePathAges().catch((err) =>
+              api.logger.debug?.(`memory-lancedb-pro: write-age report failed: ${String(err)}`)
+            );
+          }, BACKUP_INTERVAL_MS);
 
           // TM4: transcript indexing — initial pass 90s after start, then periodic
           if (sessionFts) {
@@ -1124,6 +1229,10 @@ const memoryLanceDBProPlugin = {
         if (observationTimer) {
           clearInterval(observationTimer);
           observationTimer = null;
+        }
+        if (writeAgeTimer) {
+          clearInterval(writeAgeTimer);
+          writeAgeTimer = null;
         }
         if (sessionIndexTimer) {
           clearInterval(sessionIndexTimer);
