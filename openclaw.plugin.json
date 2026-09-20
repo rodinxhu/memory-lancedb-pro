@@ -11,7 +11,8 @@
       "memory_forget",
       "memory_update",
       "memory_stats",
-      "memory_list"
+      "memory_list",
+      "session_search"
     ]
   },
   "configSchema": {
@@ -128,7 +129,11 @@
           },
           "rerankProvider": {
             "type": "string",
-            "enum": ["jina", "siliconflow", "pinecone"],
+            "enum": [
+              "jina",
+              "siliconflow",
+              "pinecone"
+            ],
             "default": "jina",
             "description": "Reranker provider format. Determines request/response shape and auth header."
           },
@@ -225,6 +230,194 @@
                 "type": "string"
               }
             }
+          }
+        }
+      },
+      "observations": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "TM1 (total-memory): store every turn pair as a low-importance observation in a dedicated scope so no fact is silently lost"
+          },
+          "importance": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "default": 0.3,
+            "description": "Importance assigned to observation entries (kept low so curated memories outrank raw turns)"
+          },
+          "retentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365,
+            "default": 45,
+            "description": "Observations older than this are expired by the daily maintenance pass"
+          },
+          "dedupThreshold": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 1,
+            "default": 0.97,
+            "description": "Vector similarity above which a new observation is considered a duplicate and skipped"
+          },
+          "maxTextLength": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 8000,
+            "default": 1600,
+            "description": "Hard cap on stored observation text length (characters)"
+          }
+        }
+      },
+      "compactionExtract": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "TM2 (total-memory): before compaction summarizes history away, sweep it for missed turn pairs (to observation scope) and trigger-matched facts (to default scope)"
+          },
+          "maxPairs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "default": 40,
+            "description": "Max turn pairs swept per compaction, oldest first (each costs one embedding call)"
+          },
+          "maxFacts": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 50,
+            "default": 10,
+            "description": "Max trigger-matched facts stored per compaction"
+          }
+        }
+      },
+      "prefetch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "TM3 (total-memory): warm a per-session retrieval cache after each turn and serve recall from it instantly when the next query is similar"
+          },
+          "similarityGate": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 1,
+            "default": 0.85,
+            "description": "Cosine similarity (incoming query vs prefetched query) required to serve cached recall; below it falls back to live retrieval"
+          },
+          "liveRerankTimeoutMs": {
+            "type": "integer",
+            "minimum": 200,
+            "maximum": 10000,
+            "default": 1500,
+            "description": "Rerank API timeout for the live-fallback path (background prefetch keeps 5000ms)"
+          },
+          "ttlMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 30,
+            "description": "Prefetched results expire after this many minutes"
+          },
+          "maxSessions": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "default": 50,
+            "description": "Max concurrent sessions kept in the prefetch cache (oldest evicted)"
+          }
+        }
+      },
+      "sessionSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "TM4 (total-memory): verbatim full-text search over session transcripts via an SQLite FTS5 sidecar (session_search tool + memx sessions CLI)"
+          },
+          "dbPath": {
+            "type": "string",
+            "description": "Sidecar index path (default: <state>/memory/session-fts.db)"
+          },
+          "maxResults": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 8,
+            "description": "Default result limit for the session_search tool"
+          },
+          "indexIntervalMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1440,
+            "default": 10,
+            "description": "Background incremental indexing interval"
+          },
+          "maxMessageLength": {
+            "type": "integer",
+            "minimum": 500,
+            "maximum": 32000,
+            "default": 4000,
+            "description": "Max characters of one message stored in the index"
+          }
+        }
+      },
+      "threatScan": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "TM5 (total-memory): neutralize prompt-injection patterns (instruction override, role hijack, prompt exfiltration, tag injection) before any text is stored to memory"
+          }
+        }
+      },
+      "egressGuard": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Gate outbound sends to destinations the owner has not vouched for. Recalled memories sit in context on every turn, so an injected instruction could exfiltrate them via a send tool.",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable the memory egress guard"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "block",
+              "log"
+            ],
+            "default": "approve",
+            "description": "approve = ask the owner; block = refuse; log = observe only"
+          },
+          "allowedTargets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Destinations that never need approval: chat ids, emails, or *@domain.com"
+          },
+          "extraSendTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": [],
+            "description": "Extra tool-name substrings to treat as outbound sends"
           }
         }
       }
@@ -390,6 +583,109 @@
       "label": "Normalized Embeddings",
       "help": "Request normalized embeddings when the provider supports it (Jina v5). If unset, the field is not sent.",
       "advanced": true
+    },
+    "observations.enabled": {
+      "label": "Observation Layer (TM1)",
+      "help": "Store every turn pair as a low-importance observation so no fact is silently lost; promoted/expired by nightly maintenance"
+    },
+    "observations.importance": {
+      "label": "Observation Importance",
+      "help": "Importance assigned to observation entries (low keeps curated memories ranked above raw turns)",
+      "advanced": true
+    },
+    "observations.retentionDays": {
+      "label": "Observation Retention (days)",
+      "help": "Observations older than this are deleted by the daily maintenance pass",
+      "advanced": true
+    },
+    "observations.dedupThreshold": {
+      "label": "Observation Dedup Threshold",
+      "help": "Vector similarity above which a new observation is skipped as a duplicate",
+      "advanced": true
+    },
+    "observations.maxTextLength": {
+      "label": "Observation Max Length",
+      "help": "Hard cap on stored observation text (characters)",
+      "advanced": true
+    },
+    "compactionExtract.enabled": {
+      "label": "Pre-compaction Extraction (TM2)",
+      "help": "Harvest history into memory before compaction destroys it"
+    },
+    "compactionExtract.maxPairs": {
+      "label": "Compaction Sweep Max Pairs",
+      "advanced": true,
+      "help": "Max turn pairs swept per compaction (oldest first)"
+    },
+    "compactionExtract.maxFacts": {
+      "label": "Compaction Sweep Max Facts",
+      "advanced": true,
+      "help": "Max trigger-matched facts stored per compaction"
+    },
+    "prefetch.enabled": {
+      "label": "Prefetch Recall (TM3)",
+      "help": "Serve memory recall from a cache warmed after the previous turn — near-zero recall latency in ongoing conversations"
+    },
+    "prefetch.similarityGate": {
+      "label": "Prefetch Similarity Gate",
+      "advanced": true,
+      "help": "How close the new query must be to the prefetched one to use the cache"
+    },
+    "prefetch.liveRerankTimeoutMs": {
+      "label": "Live Rerank Timeout (ms)",
+      "advanced": true,
+      "help": "Rerank timeout when falling back to live retrieval"
+    },
+    "prefetch.ttlMinutes": {
+      "label": "Prefetch TTL (minutes)",
+      "advanced": true
+    },
+    "prefetch.maxSessions": {
+      "label": "Prefetch Max Sessions",
+      "advanced": true
+    },
+    "sessionSearch.enabled": {
+      "label": "Session Search (TM4)",
+      "help": "Verbatim transcript search — exact quotes, names, numbers, dates"
+    },
+    "sessionSearch.dbPath": {
+      "label": "Session Index Path",
+      "advanced": true
+    },
+    "sessionSearch.maxResults": {
+      "label": "Session Search Max Results",
+      "advanced": true
+    },
+    "sessionSearch.indexIntervalMinutes": {
+      "label": "Session Index Interval (min)",
+      "advanced": true
+    },
+    "sessionSearch.maxMessageLength": {
+      "label": "Session Index Max Message Length",
+      "advanced": true
+    },
+    "threatScan.enabled": {
+      "label": "Store-time Threat Scan (TM5)",
+      "help": "Block injection-style instructions from entering long-term memory"
+    },
+    "egressGuard": {
+      "label": "Memory Egress Guard",
+      "help": "Requires approval before the agent sends to a destination you have not vouched for — the main defence against prompt-injection exfiltration of recalled memories.",
+      "enabled": {
+        "label": "Enabled"
+      },
+      "mode": {
+        "label": "Mode",
+        "help": "approve (recommended) / block / log"
+      },
+      "allowedTargets": {
+        "label": "Vouched destinations",
+        "help": "Chat ids, email addresses, or *@domain.com wildcards"
+      },
+      "extraSendTools": {
+        "label": "Extra send tools",
+        "advanced": true
+      }
     }
   }
 }

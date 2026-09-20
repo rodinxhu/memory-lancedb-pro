@@ -18,6 +18,11 @@ import { registerAllMemoryTools } from "./src/tools.js";
 import { shouldSkipRetrieval } from "./src/adaptive-retrieval.js";
 import { isNoise } from "./src/noise-filter.js";
 import {
+  evaluateEgress,
+  parseEgressGuardConfig,
+  type EgressGuardConfig,
+} from "./src/egress-guard.js";
+import {
   captureObservation,
   expireObservations,
   extractTurnPair,
@@ -108,6 +113,8 @@ interface PluginConfig {
   sessionSearch?: SessionSearchConfig;
   /** TM5 (total-memory): store-time injection-pattern neutralization. */
   threatScan?: ThreatScanConfig;
+  /** Egress guard: gate outbound sends to un-vouched destinations. */
+  egressGuard?: Partial<EgressGuardConfig>;
 }
 
 // ============================================================================
@@ -421,6 +428,54 @@ const memoryLanceDBProPlugin = {
     );
     if (threatScanConfig.enabled) {
       api.logger.info("memory-lancedb-pro: store-time threat scan enabled");
+    }
+
+    // Egress guard: recalled memories sit in context on every turn, and the
+    // agent can send mail unattended. Gate sends to destinations the owner
+    // hasn't vouched for. See src/egress-guard.ts for why this asks for
+    // approval rather than blocking outright.
+    const egressConfig = parseEgressGuardConfig(config.egressGuard);
+    if (egressConfig.enabled) {
+      try {
+        api.on("before_tool_call", async (event) => {
+          try {
+            api.logger.debug?.(`memory-lancedb-pro: egress-guard saw tool "${event.toolName}"`);
+            const decision = evaluateEgress(
+              event.toolName,
+              (event.params ?? {}) as Record<string, unknown>,
+              egressConfig
+            );
+            if (decision.action === "allow") {
+              if (decision.reason) {
+                api.logger.warn(`memory-lancedb-pro: egress-guard (log-only) ${decision.reason}`);
+              }
+              return;
+            }
+            api.logger.warn(`memory-lancedb-pro: egress-guard ${decision.action}: ${decision.reason}`);
+            if (decision.action === "block") {
+              return { block: true, blockReason: decision.reason };
+            }
+            return {
+              requireApproval: {
+                title: "Unrecognised send destination",
+                description: decision.reason ?? "Outbound send to an un-vouched destination.",
+                severity: "critical" as const,
+                timeoutBehavior: "deny" as const,
+              },
+            };
+          } catch (err) {
+            // Never let the guard break a tool call.
+            api.logger.warn(`memory-lancedb-pro: egress-guard error (allowing): ${String(err)}`);
+          }
+        });
+        api.logger.info(
+          `memory-lancedb-pro: egress guard enabled (mode: ${egressConfig.mode}, ${egressConfig.allowedTargets.length} vouched target(s))`
+        );
+      } catch (err) {
+        api.logger.warn(
+          `memory-lancedb-pro: egress guard registration failed (before_tool_call unavailable?): ${String(err)}`
+        );
+      }
     }
 
     // TM5: warn when running on an OpenClaw version this plugin wasn't validated
@@ -1124,6 +1179,7 @@ function parsePluginConfig(value: unknown): PluginConfig {
       prefetch: parsePrefetchConfig(cfg.prefetch),
       sessionSearch: parseSessionSearchConfig(cfg.sessionSearch),
       threatScan: parseThreatScanConfig(cfg.threatScan),
+      egressGuard: parseEgressGuardConfig(cfg.egressGuard),
       sessionMemory: typeof cfg.sessionMemory === "object" && cfg.sessionMemory !== null
         ? {
             enabled: (cfg.sessionMemory as Record<string, unknown>).enabled !== false,
