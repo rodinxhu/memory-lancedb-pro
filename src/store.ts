@@ -469,7 +469,19 @@ export class MemoryStore {
 
   async update(
     id: string,
-    updates: { text?: string; vector?: number[]; importance?: number; category?: MemoryEntry["category"]; metadata?: string },
+    updates: {
+      text?: string;
+      vector?: number[];
+      importance?: number;
+      category?: MemoryEntry["category"];
+      metadata?: string;
+      /**
+       * Only for repairing provenance (e.g. restoring creation times lost by a
+       * rebuild). Normal edits must leave the timestamp alone — it records when
+       * the memory was CREATED, and recency/decay scoring depends on it.
+       */
+      timestamp?: number;
+    },
     scopeFilter?: string[]
   ): Promise<MemoryEntry | null> {
     await this.ensureInitialized();
@@ -515,7 +527,11 @@ export class MemoryStore {
       category: updates.category ?? (row.category as MemoryEntry["category"]),
       scope: rowScope,
       importance: updates.importance ?? (row.importance as number),
-      timestamp: row.timestamp as number, // preserve original
+      // Preserve the original creation time unless a caller is explicitly
+      // repairing it.
+      timestamp: Number.isFinite(updates.timestamp)
+        ? (updates.timestamp as number)
+        : (row.timestamp as number),
       metadata: updates.metadata ?? ((row.metadata as string) || "{}"),
     };
 

@@ -318,6 +318,60 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
       }
     });
 
+  // Provenance repair. Creation timestamps drive recency and time-decay
+  // scoring, and a rebuild that re-stamps them silently flattens both.
+  memory
+    .command("fix-timestamps <file>")
+    .description("Restore creation timestamps from a backup JSONL (matches on exact text)")
+    .option("--scope <scope>", "Limit to one scope")
+    .option("--dry-run", "Report what would change without writing")
+    .action(async (file, options) => {
+      try {
+        const fs = await import("node:fs/promises");
+        const raw = await fs.readFile(file, "utf-8");
+        const originals = new Map<string, number>();
+        for (const line of raw.split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            const r = JSON.parse(line);
+            if (typeof r.text !== "string" || !Number.isFinite(r.timestamp)) continue;
+            const prev = originals.get(r.text);
+            // Keep the earliest sighting — that is the real creation time.
+            if (prev === undefined || r.timestamp < prev) originals.set(r.text, r.timestamp);
+          } catch { /* skip malformed line */ }
+        }
+
+        const scopes = options.scope
+          ? [options.scope]
+          : Object.keys((await context.store.stats()).scopeCounts);
+
+        let fixed = 0, unmatched = 0, alreadyOk = 0;
+        for (const scope of scopes) {
+          const rows = await context.store.list([scope], undefined, 5000, 0);
+          for (const m of rows) {
+            const orig = originals.get(m.text);
+            if (orig === undefined) { unmatched++; continue; }
+            if (Math.abs(m.timestamp - orig) <= 60_000) { alreadyOk++; continue; }
+            if (options.dryRun) {
+              const from = new Date(m.timestamp).toISOString().split("T")[0];
+              const to = new Date(orig).toISOString().split("T")[0];
+              console.log(`${from} -> ${to}  [${scope}] ${m.text.slice(0, 60)}`);
+            } else {
+              await context.store.update(m.id, { timestamp: orig }, [scope]);
+            }
+            fixed++;
+          }
+        }
+        console.log(
+          `${options.dryRun ? "Would repair" : "Repaired"} ${fixed} timestamp(s); ` +
+          `${alreadyOk} already correct, ${unmatched} not present in the backup.`
+        );
+      } catch (error) {
+        console.error("Timestamp repair failed:", error);
+        process.exit(1);
+      }
+    });
+
   // TM4: verbatim session transcript search (FTS5 sidecar)
   memory
     .command("sessions <query>")
@@ -589,13 +643,22 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
             }
 
             const vector = await context.embedder.embedPassage(text);
-            await context.store.store({
+            // store() stamps Date.now(), which silently rewrites every
+            // creation time on a rebuild — an import restored months of
+            // memories all dated "today" on 2026-09-18 and again on 09-20,
+            // destroying the provenance that recency and time-decay scoring
+            // depend on. Preserve the exported timestamp when there is one.
+            const stored = await context.store.store({
               text,
               vector,
               importance: memory.importance ?? 0.7,
               category: memory.category || "other",
               scope: targetScope,
+              metadata: typeof memory.metadata === "string" ? memory.metadata : undefined,
             });
+            if (Number.isFinite(memory.timestamp) && memory.timestamp !== stored.timestamp) {
+              await context.store.update(stored.id, { timestamp: memory.timestamp });
+            }
             imported++;
           } catch (error) {
             console.warn(`Failed to import memory: ${error}`);
