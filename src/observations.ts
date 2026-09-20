@@ -365,6 +365,46 @@ function clusterSpanDays(members: Array<{ timestamp: number }>): number {
 }
 
 /**
+ * D2: one-off facts that clustering structurally cannot catch.
+ *
+ * Clusters require recurrence (>=3 members over >=2 days). But most durable
+ * facts are stated exactly once — "Ted proposed $3M at 6.5% commission" is
+ * said one time and matters for a year. With auto-capture no longer writing
+ * curated memories directly, anything clustering misses would expire with the
+ * observation at 45 days and be lost.
+ *
+ * So surface recent un-promoted observations and let the nightly agent judge
+ * which are durable. Deliberately NO keyword gate here — a regex deciding what
+ * is worth remembering is the exact mistake that emptied this store for a
+ * month (see shouldCapture in index.ts). Filter only obvious non-candidates
+ * and let the model do the judging.
+ */
+export async function findSingletonCandidates(
+  store: MemoryStore,
+  agentId: string,
+  options: { lookbackDays?: number; maxCandidates?: number; excludeIds?: Set<string> } = {}
+): Promise<PromotionCandidate[]> {
+  const lookbackDays = options.lookbackDays ?? 2;
+  const maxCandidates = options.maxCandidates ?? 15;
+  const exclude = options.excludeIds ?? new Set<string>();
+
+  const scope = observationScope(agentId);
+  const since = Date.now() - lookbackDays * 24 * 60 * 60 * 1000;
+
+  const recent = (await store.list([scope], undefined, 500, 0)).filter(
+    (m) =>
+      m.timestamp >= since &&
+      !exclude.has(m.id) &&
+      JSON.parse(m.metadata || "{}").promoted !== true &&
+      !isOperationalTurn(m.text)
+  );
+
+  return recent
+    .slice(0, maxCandidates)
+    .map((m) => ({ text: m.text, memberIds: [m.id], count: 1 }));
+}
+
+/**
  * D5: turns that are us operating the machine, not facts about the user's world.
  * Debugging sessions produce dense bursts of near-identical turns, which is
  * exactly what the clustering rewards — so they must be excluded by hand.

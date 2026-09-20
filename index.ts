@@ -1021,7 +1021,12 @@ const memoryLanceDBProPlugin = {
      * it on day one, so report it at startup and daily, and escalate when a
      * path that normally writes goes quiet.
      */
-    const WRITE_PATH_QUIET_DAYS = 7;
+    // Per-path thresholds. Observations write on every turn, so a week of
+    // silence is clearly wrong. Curated memories are now produced only by the
+    // nightly promotion pass (D2), which legitimately promotes nothing on a
+    // quiet stretch — alerting at 7 days there would cry wolf, and an alert
+    // nobody trusts is worth less than no alert.
+    const QUIET_DAYS = { curated: 14, observations: 7 } as const;
     async function reportWritePathAges() {
       const stats = await store.stats();
       const scopes = Object.keys(stats.scopeCounts);
@@ -1051,10 +1056,12 @@ const memoryLanceDBProPlugin = {
       );
 
       for (const [label, age] of [["curated", curatedAge], ["observations", observedAge]] as const) {
-        if (age !== null && age > WRITE_PATH_QUIET_DAYS) {
+        const threshold = QUIET_DAYS[label];
+        if (age !== null && age > threshold) {
           const msg =
-            `memory-lancedb-pro: WRITE PATH QUIET — no ${label} memory written in ${age} days. ` +
-            `This is the signature of the August 2026 silent failure. Check the ${label} hook.`;
+            `memory-lancedb-pro: WRITE PATH QUIET — no ${label} memory written in ${age} days ` +
+            `(threshold ${threshold}d). This is the signature of the August 2026 silent failure. ` +
+            `Check the ${label} path.`;
           api.logger.error?.(msg) ?? api.logger.warn(msg);
         }
       }

@@ -4,6 +4,7 @@
 
 import type { Command } from "commander";
 import { loadLanceDB, type MemoryEntry, type MemoryStore } from "./src/store.js";
+import { findPromotionCandidates, findSingletonCandidates, observationScope } from "./src/observations.js";
 import type { MemoryRetriever } from "./src/retriever.js";
 import type { MemoryScopeManager } from "./src/scopes.js";
 import type { MemoryMigrator } from "./src/migrate.js";
@@ -18,6 +19,10 @@ interface CLIContext {
   scopeManager: MemoryScopeManager;
   migrator: MemoryMigrator;
   embedder?: import("./src/embedder.js").Embedder;
+  /** TM4: verbatim session transcript search (absent when sessionSearch.enabled=false). */
+  sessionFts?: import("./src/session-fts.js").SessionFtsIndex;
+  /** TM4: agents dir for on-demand incremental indexing before CLI searches. */
+  agentsDir?: string;
 }
 
 // ============================================================================
@@ -134,6 +139,138 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
         }
       } catch (error) {
         console.error("Search failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Dreaming pass: cluster recurring observations for promotion to curated memory
+  memory
+    .command("dream")
+    .description("Find recurring observation clusters ready to promote into curated memories")
+    .option("--agent <id>", "Agent whose observations to cluster", "main")
+    .option("--days <n>", "Lookback window in days", "14")
+    .option("--min-cluster <n>", "Minimum related turns to qualify as recurring", "3")
+    .option("--max <n>", "Maximum candidates to return", "5")
+    .option("--mark <ids>", "Comma-separated observation IDs to flag as promoted (run after storing the distilled memory)")
+    .option("--singleton-days <n>", "Lookback for individual (non-recurring) turns", "2")
+    .option("--max-singletons <n>", "Maximum individual turns to surface for judging", "15")
+    .option("--no-singletons", "Only return recurring clusters")
+    .option("--json", "Output as JSON")
+    .action(async (options) => {
+      try {
+        const agentId = options.agent || "main";
+        const scope = observationScope(agentId);
+
+        if (options.mark) {
+          const ids = String(options.mark).split(",").map((s: string) => s.trim()).filter(Boolean);
+          // Merge promoted:true into each entry's metadata (update replaces the string).
+          const all = await context.store.list([scope], undefined, 2000, 0);
+          const byId = new Map(all.map((m) => [m.id, m]));
+          let marked = 0;
+          for (const id of ids) {
+            const entry = byId.get(id) ?? all.find((m) => m.id.startsWith(id));
+            if (!entry) {
+              console.error(`not found in ${scope}: ${id}`);
+              continue;
+            }
+            let meta: Record<string, unknown> = {};
+            try { meta = JSON.parse(entry.metadata || "{}"); } catch { /* keep empty */ }
+            meta.promoted = true;
+            await context.store.update(entry.id, { metadata: JSON.stringify(meta) }, [scope]);
+            marked++;
+          }
+          console.log(options.json ? JSON.stringify({ marked, requested: ids.length }) : `Marked ${marked}/${ids.length} observations as promoted.`);
+          return;
+        }
+
+        const clusters = await findPromotionCandidates(context.store, agentId, {
+          lookbackDays: parseInt(options.days) || 14,
+          minClusterSize: parseInt(options.minCluster) || 3,
+          maxCandidates: parseInt(options.max) || 5,
+        });
+
+        // D2: clustering only finds RECURRING topics, but most durable facts
+        // are stated once. Surface recent un-promoted turns too and let the
+        // nightly agent judge which are worth keeping.
+        const clustered = new Set(clusters.flatMap((c) => c.memberIds));
+        const singletons = options.noSingletons
+          ? []
+          : await findSingletonCandidates(context.store, agentId, {
+              lookbackDays: parseInt(options.singletonDays) || 2,
+              maxCandidates: parseInt(options.maxSingletons) || 15,
+              excludeIds: clustered,
+            });
+
+        if (options.json) {
+          console.log(formatJson({
+            clusters: clusters.map((c) => ({ ...c, kind: "cluster" })),
+            singletons: singletons.map((c) => ({ ...c, kind: "singleton" })),
+          }));
+        } else if (clusters.length === 0 && singletons.length === 0) {
+          console.log("No recurring observation clusters found (nothing to dream about).");
+        } else {
+          if (clusters.length > 0) {
+            console.log(`Found ${clusters.length} recurring cluster(s):\n`);
+            clusters.forEach((c, i) => {
+              console.log(`${i + 1}. ${c.count} related turns — representative:`);
+              console.log(`   ${c.text.slice(0, 200)}${c.text.length > 200 ? "…" : ""}`);
+              console.log(`   member IDs: ${c.memberIds.join(",")}\n`);
+            });
+          }
+          if (singletons.length > 0) {
+            console.log(`Found ${singletons.length} recent turn(s) to judge individually:\n`);
+            singletons.forEach((c, i) => {
+              console.log(`${i + 1}. ${c.text.slice(0, 200)}${c.text.length > 200 ? "…" : ""}`);
+              console.log(`   id: ${c.memberIds[0]}\n`);
+            });
+          }
+        }
+      } catch (error) {
+        console.error("Dream pass failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // TM4: verbatim session transcript search (FTS5 sidecar)
+  memory
+    .command("sessions <query>")
+    .description("Verbatim full-text search over session transcripts (TM4)")
+    .option("--agent <id>", "Filter by agent ID")
+    .option("--limit <n>", "Maximum number of results", "8")
+    .option("--reindex", "Drop and rebuild the FTS index first")
+    .option("--json", "Output as JSON")
+    .action(async (query, options) => {
+      try {
+        if (!context.sessionFts) {
+          console.error("Session search is disabled (sessionSearch.enabled=false) or unavailable.");
+          process.exit(1);
+        }
+        if (context.agentsDir) {
+          if (options.reindex) {
+            const r = await context.sessionFts.reindex(context.agentsDir);
+            console.error(`Reindexed ${r.files} files (${r.messages} messages).`);
+          } else {
+            await context.sessionFts.indexAll(context.agentsDir); // cheap incremental catch-up
+          }
+        }
+        const results = await context.sessionFts.search(query, {
+          limit: parseInt(options.limit) || 8,
+          agentId: options.agent,
+        });
+        if (options.json) {
+          console.log(formatJson(results));
+        } else if (results.length === 0) {
+          console.log("No matching transcript messages found.");
+        } else {
+          console.log(`Found ${results.length} transcript matches:\n`);
+          results.forEach((r, i) => {
+            const date = (r.ts || "").replace("T", " ").slice(0, 16) || "unknown time";
+            console.log(`${i + 1}. [${date}] ${r.agentId}/${r.role} (session ${r.sessionId.slice(0, 8)}…)`);
+            console.log(`   ${r.snippet}\n`);
+          });
+        }
+      } catch (error) {
+        console.error("Session search failed:", error);
         process.exit(1);
       }
     });
