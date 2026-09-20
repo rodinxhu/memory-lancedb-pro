@@ -17,6 +17,7 @@ import { createMigrator } from "./src/migrate.js";
 import { registerAllMemoryTools } from "./src/tools.js";
 import { shouldSkipRetrieval } from "./src/adaptive-retrieval.js";
 import { isNoise } from "./src/noise-filter.js";
+import { archiveDirFor, archiveMemories } from "./src/archive.js";
 import {
   evaluateEgress,
   parseEgressGuardConfig,
@@ -412,6 +413,8 @@ const memoryLanceDBProPlugin = {
     // TM4: verbatim session search — FTS5 sidecar next to the LanceDB dir.
     const sessionSearchConfig = parseSessionSearchConfig(config.sessionSearch);
     const stateDir = dirname(dirname(resolvedDbPath)); // <state>/memory/lancedb-pro → <state>
+    // Cold archive lives beside the table: <state>/memory/archive/
+    const archiveDir = archiveDirFor(resolvedDbPath);
     const agentsDir = join(stateDir, "agents");
     const sessionFts = sessionSearchConfig.enabled
       ? new SessionFtsIndex(
@@ -1077,7 +1080,12 @@ const memoryLanceDBProPlugin = {
         let expired = 0;
         for (const scope of obsScopes) {
           const agentId = scope.slice("observations:agent:".length);
-          expired += await expireObservations(store, agentId, obsConfig.retentionDays);
+          // Archive before expiring — an observation nobody retrieved is
+          // still a record of what was said, and the user asked that history
+          // be kept offline rather than destroyed.
+          expired += await expireObservations(store, agentId, obsConfig.retentionDays, (entries) =>
+            archiveMemories(archiveDir, entries, "expired")
+          );
         }
         if (expired > 0) {
           api.logger.info(`memory-lancedb-pro: expired ${expired} observations older than ${obsConfig.retentionDays}d`);

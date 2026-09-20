@@ -11,7 +11,7 @@
  * Inspired by Hermes' MemoryProvider.sync_turn() / Honcho observations.
  */
 
-import type { MemoryStore } from "./store.js";
+import type { MemoryEntry, MemoryStore } from "./store.js";
 import type { Embedder } from "./embedder.js";
 
 // ============================================================================
@@ -267,10 +267,28 @@ export async function captureObservation(
 export async function expireObservations(
   store: MemoryStore,
   agentId: string,
-  retentionDays: number
+  retentionDays: number,
+  /**
+   * Cold archive sink. Expiry used to be a straight delete, which threw away
+   * history: an observation nobody retrieved is still a record of what was
+   * said. When this is supplied, expired rows are written to the archive
+   * BEFORE being removed, and a failure to archive aborts the delete.
+   */
+  archive?: (entries: MemoryEntry[]) => Promise<number>
 ): Promise<number> {
+  const scope = observationScope(agentId);
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  return store.bulkDelete([observationScope(agentId)], cutoff);
+
+  if (archive) {
+    const doomed = (await store.list([scope], undefined, 10_000, 0)).filter(
+      (m) => m.timestamp < cutoff
+    );
+    if (doomed.length === 0) return 0;
+    // Archive first. If this throws, nothing is deleted.
+    await archive(doomed);
+  }
+
+  return store.bulkDelete([scope], cutoff);
 }
 
 export interface PromotionCandidate {

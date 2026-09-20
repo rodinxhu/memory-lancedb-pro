@@ -5,6 +5,7 @@
 import type { Command } from "commander";
 import { loadLanceDB, type MemoryEntry, type MemoryStore } from "./src/store.js";
 import { findPromotionCandidates, findSingletonCandidates, observationScope } from "./src/observations.js";
+import { archiveDirFor, archiveStats, restoreFromArchive, searchArchive } from "./src/archive.js";
 import type { MemoryRetriever } from "./src/retriever.js";
 import type { MemoryScopeManager } from "./src/scopes.js";
 import type { MemoryMigrator } from "./src/migrate.js";
@@ -227,6 +228,92 @@ export function registerMemoryCLI(program: Command, context: CLIContext): void {
         }
       } catch (error) {
         console.error("Dream pass failed:", error);
+        process.exit(1);
+      }
+    });
+
+  // Cold archive: evicted memories are moved here, never deleted.
+  const archive = memory
+    .command("archive")
+    .description("Inspect and restore memories moved to the cold archive");
+
+  archive
+    .command("stats")
+    .description("Summarise what has been archived")
+    .option("--json", "Output as JSON")
+    .action(async (options) => {
+      try {
+        const dir = archiveDirFor(context.store.dbPath);
+        const s = await archiveStats(dir);
+        if (options.json) {
+          console.log(formatJson({ ...s, archiveDir: dir }));
+          return;
+        }
+        if (s.total === 0) {
+          console.log(`Archive is empty (${dir}).`);
+          return;
+        }
+        const fmt = (t: number | null) => (t ? new Date(t).toISOString().split("T")[0] : "-");
+        console.log(`Archive: ${s.total} record(s) in ${dir}`);
+        console.log(`  span:     ${fmt(s.oldestArchivedAt)} → ${fmt(s.newestArchivedAt)}`);
+        console.log(`  restored: ${s.restored}`);
+        for (const [reason, n] of Object.entries(s.byReason).sort((a, b) => b[1] - a[1])) {
+          console.log(`  ${reason.padEnd(13)} ${n}`);
+        }
+      } catch (error) {
+        console.error("Archive stats failed:", error);
+        process.exit(1);
+      }
+    });
+
+  archive
+    .command("search <query>")
+    .description("Substring search over archived memories (works with the embedder offline)")
+    .option("--limit <n>", "Maximum results", "20")
+    .option("--json", "Output as JSON")
+    .action(async (query, options) => {
+      try {
+        const hits = await searchArchive(archiveDirFor(context.store.dbPath), query, parseInt(options.limit) || 20);
+        if (options.json) {
+          console.log(formatJson(hits));
+          return;
+        }
+        if (hits.length === 0) {
+          console.log("No archived memories matched.");
+          return;
+        }
+        console.log(`Found ${hits.length} archived memor(ies):\n`);
+        hits.forEach((h, i) => {
+          const when = new Date(h.archivedAt).toISOString().split("T")[0];
+          console.log(`${i + 1}. [${h.category}:${h.scope}] archived ${when} (${h.archivedReason})`);
+          console.log(`   ${h.text.slice(0, 180)}${h.text.length > 180 ? "…" : ""}`);
+          console.log(`   id: ${h.id}\n`);
+        });
+      } catch (error) {
+        console.error("Archive search failed:", error);
+        process.exit(1);
+      }
+    });
+
+  archive
+    .command("restore <ids...>")
+    .description("Pull archived memories back into the live store (re-embeds them)")
+    .action(async (ids: string[]) => {
+      try {
+        if (!context.embedder) {
+          console.error("Restore requires an embedder (not available in basic CLI mode).");
+          process.exit(1);
+        }
+        const res = await restoreFromArchive(
+          archiveDirFor(context.store.dbPath),
+          context.store,
+          (t) => context.embedder!.embedPassage(t),
+          ids
+        );
+        console.log(`Restored ${res.restored} memor(ies).`);
+        if (res.notFound.length > 0) console.error(`Not found in archive: ${res.notFound.join(", ")}`);
+      } catch (error) {
+        console.error("Archive restore failed:", error);
         process.exit(1);
       }
     });
