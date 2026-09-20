@@ -58,6 +58,8 @@ export interface RetrievalConfig {
    * Set 0 to disable. (default: 60)
    */
   timeDecayHalfLifeDays: number;
+  /** Cross-encoder rerank API timeout in ms (default: 5000). */
+  rerankTimeoutMs?: number;
 }
 
 export interface RetrievalContext {
@@ -434,9 +436,10 @@ export class MemoryRetriever {
         // Build provider-specific request
         const { headers, body } = buildRerankRequest(provider, this.config.rerankApiKey, model, query, documents, results.length);
 
-        // Timeout: 5 seconds to prevent stalling retrieval pipeline
+        // Timeout to prevent stalling the retrieval pipeline (default 5s;
+        // TM3's live-fallback retriever overrides this to stay snappy).
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
+        const timeout = setTimeout(() => controller.abort(), this.config.rerankTimeoutMs ?? 5000);
 
         const response = await fetch(endpoint, {
           method: "POST",

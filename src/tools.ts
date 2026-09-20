@@ -4,7 +4,6 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import { stringEnum } from "openclaw/plugin-sdk";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type { MemoryRetriever, RetrievalResult } from "./retriever.js";
 import type { MemoryStore } from "./store.js";
@@ -24,6 +23,8 @@ interface ToolContext {
   scopeManager: MemoryScopeManager;
   embedder: Embedder;
   agentId?: string;
+  /** TM5: store-time threat neutralization (absent when threatScan.enabled=false). */
+  sanitize?: (text: string) => string;
 }
 
 // ============================================================================
@@ -52,6 +53,10 @@ function sanitizeMemoryForSerialization(results: RetrievalResult[]) {
   }));
 }
 
+
+function makeStringEnum<T extends readonly string[]>(values: T) {
+  return Type.Union(values.map(value => Type.Literal(value)) as any);
+}
 // ============================================================================
 // Core Tools (Backward Compatible)
 // ============================================================================
@@ -66,7 +71,7 @@ export function registerMemoryRecallTool(api: OpenClawPluginApi, context: ToolCo
         query: Type.String({ description: "Search query for finding relevant memories" }),
         limit: Type.Optional(Type.Number({ description: "Max results to return (default: 5, max: 20)" })),
         scope: Type.Optional(Type.String({ description: "Specific memory scope to search in (optional)" })),
-        category: Type.Optional(stringEnum(MEMORY_CATEGORIES)),
+        category: Type.Optional(makeStringEnum(MEMORY_CATEGORIES)),
       }),
       async execute(_toolCallId, params) {
         const { query, limit = 5, scope, category } = params as {
@@ -148,12 +153,12 @@ export function registerMemoryStoreTool(api: OpenClawPluginApi, context: ToolCon
       parameters: Type.Object({
         text: Type.String({ description: "Information to remember" }),
         importance: Type.Optional(Type.Number({ description: "Importance score 0-1 (default: 0.7)" })),
-        category: Type.Optional(stringEnum(MEMORY_CATEGORIES)),
+        category: Type.Optional(makeStringEnum(MEMORY_CATEGORIES)),
         scope: Type.Optional(Type.String({ description: "Memory scope (optional, defaults to agent scope)" })),
       }),
       async execute(_toolCallId, params) {
         const {
-          text,
+          text: rawText,
           importance = 0.7,
           category = "other",
           scope,
@@ -163,6 +168,8 @@ export function registerMemoryStoreTool(api: OpenClawPluginApi, context: ToolCon
           category?: string;
           scope?: string;
         };
+        // TM5: neutralize injection patterns at the door
+        const text = context.sanitize ? context.sanitize(rawText) : rawText;
 
         try {
           // Determine target scope
@@ -357,15 +364,17 @@ export function registerMemoryUpdateTool(api: OpenClawPluginApi, context: ToolCo
         memoryId: Type.String({ description: "ID of the memory to update (full UUID or 8+ char prefix)" }),
         text: Type.Optional(Type.String({ description: "New text content (triggers re-embedding)" })),
         importance: Type.Optional(Type.Number({ description: "New importance score 0-1" })),
-        category: Type.Optional(stringEnum(MEMORY_CATEGORIES)),
+        category: Type.Optional(makeStringEnum(MEMORY_CATEGORIES)),
       }),
       async execute(_toolCallId, params) {
-        const { memoryId, text, importance, category } = params as {
+        const { memoryId, text: rawUpdateText, importance, category } = params as {
           memoryId: string;
           text?: string;
           importance?: number;
           category?: string;
         };
+        // TM5: neutralize injection patterns at the door
+        const text = rawUpdateText && context.sanitize ? context.sanitize(rawUpdateText) : rawUpdateText;
 
         try {
           if (!text && importance === undefined && !category) {
@@ -538,7 +547,7 @@ export function registerMemoryListTool(api: OpenClawPluginApi, context: ToolCont
       parameters: Type.Object({
         limit: Type.Optional(Type.Number({ description: "Max memories to list (default: 10, max: 50)" })),
         scope: Type.Optional(Type.String({ description: "Filter by specific scope (optional)" })),
-        category: Type.Optional(stringEnum(MEMORY_CATEGORIES)),
+        category: Type.Optional(makeStringEnum(MEMORY_CATEGORIES)),
         offset: Type.Optional(Type.Number({ description: "Number of memories to skip (default: 0)" })),
       }),
       async execute(_toolCallId, params) {
