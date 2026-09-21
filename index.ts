@@ -1178,10 +1178,17 @@ const memoryLanceDBProPlugin = {
             if (rows === 0) {
               api.logger.warn("memory-lancedb-pro: store is EMPTY — recall will return nothing until memories are written");
             } else {
+              // Probe with a stored memory's OWN text rather than a generic
+              // phrase. A fixed query like "project status update" can
+              // legitimately match nothing above minScore, which fired a false
+              // INDEX FAULT on a perfectly healthy store. A memory that cannot
+              // retrieve itself is unambiguously broken.
+              const newest = await store.list(undefined, undefined, 1, 0);
+              const probeQuery = newest[0]?.text?.slice(0, 120) ?? "project status update";
               const probe = await retriever.retrieve({
-                query: "project status update",
+                query: probeQuery,
                 limit: 3,
-                scopeFilter: scopeManager.getAccessibleScopes("main"),
+                scopeFilter: newest[0]?.scope ? [newest[0].scope] : scopeManager.getAccessibleScopes("main"),
               });
               const hits = Array.isArray(probe) ? probe.length : 0;
               if (hits === 0) {
