@@ -57,7 +57,7 @@ import { Type } from "@sinclair/typebox";
  * TM5: the OpenClaw host version this plugin was last validated against.
  * Bump after running bin/smoke-test.sh on a new OpenClaw release.
  */
-const TESTED_OPENCLAW_VERSION = "2026.5.12";
+const TESTED_OPENCLAW_VERSION = "2026.9.5";
 import { createMemoryCLI } from "./cli.js";
 
 // ============================================================================
@@ -545,7 +545,14 @@ const memoryLanceDBProPlugin = {
 
     // Auto-recall: inject relevant memories before agent starts
     if (config.autoRecall !== false) {
-      api.on("before_agent_start", async (event, ctx) => {
+      // Recall injection.
+      //
+      // 2026.9.x renamed this typed hook: "before_agent_start" is rejected as
+      // unknown and recall silently stops injecting — verified on 2026.9.5,
+      // where injections went from 6/hour to 0 with nothing but one startup
+      // line to show for it. Register the new name AND the old one so a single
+      // build works either side of the upgrade.
+      const recallHandler = async (event: any, ctx?: any) => {
         if (!event.prompt || shouldSkipRetrieval(event.prompt)) {
           return;
         }
@@ -612,7 +619,23 @@ const memoryLanceDBProPlugin = {
           const msg = `memory-lancedb-pro: recall failed: ${String(err)}`;
           api.logger.error?.(msg) ?? api.logger.warn(msg);
         }
-      });
+      };
+
+      // Registering an unknown hook is a logged no-op, not a throw, so trying
+      // both names is safe. Log which one took, because a silent miss here is
+      // exactly how recall died unnoticed.
+      const recallHooks: string[] = [];
+      for (const name of ["before_prompt_build", "before_agent_start"]) {
+        try {
+          api.on(name as never, recallHandler as never);
+          recallHooks.push(name);
+        } catch (err) {
+          api.logger.debug?.(`memory-lancedb-pro: hook "${name}" unavailable: ${String(err)}`);
+        }
+      }
+      api.logger.info(
+        `memory-lancedb-pro: recall hook registered (${recallHooks.join("+") || "NONE — recall will NOT inject"})`
+      );
     }
 
     // Auto-capture: analyze and store important information after agent ends
