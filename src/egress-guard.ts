@@ -115,6 +115,27 @@ const TARGET_KEYS = [
   "chat_id", "chatId", "conversationId", "address", "email", "phone", "number",
 ];
 
+/**
+ * Keys whose value is message PAYLOAD, not a destination.
+ *
+ * Addresses inside a body are the content being DISPLAYED, not somewhere the
+ * content is being sent. Without this, "display the email from dora li" made
+ * the guard read that email's own From/To/Cc lines as outbound destinations,
+ * demand approval for them, time out, deny — and because the channel is
+ * message_tool_only, the reply was then dropped entirely. Observed twice on
+ * 2026-10-23; the user saw only "I generated a reply but could not deliver it".
+ *
+ * Safe for the threat model: exfiltration requires changing WHERE a message
+ * goes, and that lives in TARGET_KEYS. An injected address in the body still
+ * only reaches the legitimate recipient. The catch-all below is retained for
+ * every other key, so a destination buried in an unusual envelope field is
+ * still caught.
+ */
+const CONTENT_KEYS = [
+  "message", "text", "body", "content", "html", "markdown",
+  "caption", "subject", "snippet", "title", "summary", "preview",
+];
+
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]{2,}/g;
 
 export function isSendTool(toolName: string, extra: string[] = []): boolean {
@@ -134,8 +155,13 @@ export function extractTargets(params: Record<string, unknown>): string[] {
     if (typeof node === "string") {
       if (key && TARGET_KEYS.includes(key)) {
         node.split(/[,;\s]+/).filter(Boolean).forEach((v) => found.add(v.trim()));
+        for (const m of node.match(EMAIL_RE) ?? []) found.add(m);
+        return;
       }
-      // An email address anywhere in a send call is a destination worth seeing.
+      // Payload, not a destination — see CONTENT_KEYS.
+      if (key && CONTENT_KEYS.includes(key)) return;
+      // An email address under any OTHER key may be a destination in an
+      // unexpected envelope field, so it still counts.
       for (const m of node.match(EMAIL_RE) ?? []) found.add(m);
       return;
     }
