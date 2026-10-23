@@ -552,6 +552,16 @@ const memoryLanceDBProPlugin = {
       // where injections went from 6/hour to 0 with nothing but one startup
       // line to show for it. Register the new name AND the old one so a single
       // build works either side of the upgrade.
+      // NOT deduped, deliberately (2026-10-23). Two injections per turn are real,
+      // but the cause is NOT duplicate hook registration as first assumed: the core
+      // calls before_prompt_build from TWO distinct sites —
+      // agent-harness-runtime.mjs and context-engine-maintenance.mjs — with
+      // different prompt text, which is why they returned 1 and 2 memories for the
+      // same turn. A runId-keyed guard was written and then removed: collapsing
+      // them would silently strip memory from whichever prompt build lost the race,
+      // and these two paths may legitimately need it. Recall correctness beats ~6s.
+      // The right fix for the latency is the prefetch cache (0 hits in 50 recalls),
+      // which removes the work instead of skipping an injection.
       const recallHandler = async (event: any, ctx?: any) => {
         if (!event.prompt || shouldSkipRetrieval(event.prompt)) {
           return;
@@ -592,6 +602,15 @@ const memoryLanceDBProPlugin = {
           }
 
           if (results.length === 0) {
+            // Log the empty case too. Without this, "no injection" is ambiguous
+            // between "recall ran and matched nothing" and "recall never fired",
+            // and the handler's other early return (!event.prompt) is silent as
+            // well — so a dead hook looks exactly like a quiet one. That
+            // ambiguity cost a verification cycle on 2026-10-23.
+            api.logger.info?.(
+              `memory-lancedb-pro: recall ran, 0 matches for agent ${agentId} ` +
+              `[${recallSource}, ${Date.now() - recallStart}ms]`
+            );
             return;
           }
 
@@ -624,6 +643,16 @@ const memoryLanceDBProPlugin = {
       // Registering an unknown hook is a logged no-op, not a throw, so trying
       // both names is safe. Log which one took, because a silent miss here is
       // exactly how recall died unnoticed.
+      //
+      // BOTH names stay registered (2026-10-23). An earlier attempt that day kept
+      // only before_agent_start, to stop the duplicate retrieval below. Recall then
+      // injected NOTHING across three consecutive chat turns — before_agent_start
+      // alone does not drive injection here, and because the handler's early
+      // returns are silent, a dead hook is indistinguishable from a quiet one.
+      // Reverted. See the note above recallHandler for why the duplicate is left
+      // alone: it comes from the core calling before_prompt_build twice, not from
+      // these two registrations, so collapsing it here would have been the wrong
+      // fix in the wrong place.
       const recallHooks: string[] = [];
       for (const name of ["before_prompt_build", "before_agent_start"]) {
         try {
