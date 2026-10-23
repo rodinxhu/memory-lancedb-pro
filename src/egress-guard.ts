@@ -143,26 +143,34 @@ export function isSendTool(toolName: string, extra: string[] = []): boolean {
   return SEND_TOOL_PATTERNS.some((r) => r.test(toolName));
 }
 
+/** Key each target in the last extractTargets() call was read from. Diagnostic only. */
+export let lastTargetOrigins: Map<string, string> = new Map();
+
 /**
  * Pull destinations out of a tool call. Walks nested objects/arrays because
  * channel tools bury the address in a delivery envelope.
  */
 export function extractTargets(params: Record<string, unknown>): string[] {
   const found = new Set<string>();
+  // Which key each target came from. The guard's log previously said only WHAT
+  // was flagged, never WHERE it was read from, so "the address was in the body"
+  // vs "the agent really addressed it there" could not be told apart after the
+  // fact -- which left a 2026-10-23 diagnosis resting on inference.
+  const origin = new Map<string, string>();
 
   const visit = (node: unknown, key?: string): void => {
     if (node == null) return;
     if (typeof node === "string") {
       if (key && TARGET_KEYS.includes(key)) {
-        node.split(/[,;\s]+/).filter(Boolean).forEach((v) => found.add(v.trim()));
-        for (const m of node.match(EMAIL_RE) ?? []) found.add(m);
+        node.split(/[,;\s]+/).filter(Boolean).forEach((v) => { found.add(v.trim()); origin.set(v.trim(), key); });
+        for (const m of node.match(EMAIL_RE) ?? []) { found.add(m); origin.set(m, key); }
         return;
       }
       // Payload, not a destination — see CONTENT_KEYS.
       if (key && CONTENT_KEYS.includes(key)) return;
       // An email address under any OTHER key may be a destination in an
       // unexpected envelope field, so it still counts.
-      for (const m of node.match(EMAIL_RE) ?? []) found.add(m);
+      for (const m of node.match(EMAIL_RE) ?? []) { found.add(m); origin.set(m, key ?? "?"); }
       return;
     }
     if (Array.isArray(node)) {
@@ -175,6 +183,7 @@ export function extractTargets(params: Record<string, unknown>): string[] {
   };
 
   visit(params);
+  lastTargetOrigins = origin;
   return [...found];
 }
 
@@ -233,7 +242,8 @@ export function evaluateEgress(
   if (unknown.length === 0) return { action: "allow", unknownTargets: [] };
 
   const reason =
-    `Outbound "${toolName}" addressed to un-vouched destination(s): ${unknown.join(", ")}. ` +
+    `Outbound "${toolName}" addressed to un-vouched destination(s): ` +
+    `${unknown.map((t) => `${t} (from param "${lastTargetOrigins.get(t) ?? "?"}")`).join(", ")}. ` +
     `Recalled memories are in this turn's context, so an injected instruction could be ` +
     `walking private data out. Approve only if you recognise the recipient.`;
 
