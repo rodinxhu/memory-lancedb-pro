@@ -100,6 +100,23 @@ function cleanText(text: string): string {
     .trim();
 }
 
+/**
+ * Assistant-side rejects. Everything above filters only the USER turn, which
+ * let the 2026-10-23 feedback loop through: Niko answered a UST status question
+ * with a city reviewer's email plus "contact the reviewer", the send was denied
+ * by the egress guard, delivery failed — and this layer stored the whole reply,
+ * failure notice included. Every later recall of that observation handed the
+ * model the address and the suggestion again, so it retried, failed, and was
+ * re-observed. An observation describes what happened, but on recall it READS
+ * AS AN INSTRUCTION; a failed outward action must not become one.
+ */
+const SKIP_ASSISTANT_PATTERNS = [
+  /could not deliver|not delivered|delivery (failed|blocked|denied)/i,
+  /未(能)?成功投递|发送(被|遭).{0,8}(拦截|阻止|拒绝)|投递失败/,
+  /egress[-\s]?guard|un-?vouched destination/i,
+  /I generated a reply but could not/i,
+];
+
 export interface TurnPair {
   user: string;
   assistant: string;
@@ -111,6 +128,8 @@ function isObservablePair(user: string, assistant: string): boolean {
   const hasCJK = /[一-鿿぀-ゟ゠-ヿ가-힯]/.test(user);
   if (user.length < (hasCJK ? 2 : 5)) return false;
   if (SKIP_USER_PATTERNS.some((r) => r.test(user))) return false;
+  // A reply that is mostly a report of its own failure is not a durable fact.
+  if (SKIP_ASSISTANT_PATTERNS.some((r) => r.test(assistant))) return false;
   return true;
 }
 
@@ -168,6 +187,22 @@ export function extractAllTurnPairs(messages: unknown[]): TurnPair[] {
 }
 
 /** Format a turn pair as the stored observation document. */
+/**
+ * Strip directly-actionable contact details from stored observations.
+ *
+ * Keep the substance — "permit is awaiting Berkeley Fire approval, reviewer is
+ * Jesus Del Toro" is a useful fact — but not the address that lets a later turn
+ * act on it unprompted. Recalled memory is reasoning material, not an address
+ * book; AGENTS.md already forbids putting memory contents into outbound mail,
+ * and this removes the means as well as the permission.
+ */
+const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const PHONE_RE = /(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}\b/g;
+
+export function redactContacts(text: string): string {
+  return text.replace(EMAIL_RE, "[email redacted]").replace(PHONE_RE, "[phone redacted]");
+}
+
 export function formatObservation(pair: TurnPair, maxLength: number, dateStr: string): string {
   // Budget: user gets up to 45% of the cap, assistant the rest.
   const userBudget = Math.floor(maxLength * 0.45);
@@ -177,7 +212,7 @@ export function formatObservation(pair: TurnPair, maxLength: number, dateStr: st
     pair.assistant.length > assistantBudget
       ? pair.assistant.slice(0, assistantBudget) + "…"
       : pair.assistant;
-  return `[${dateStr}] user: ${user}\nassistant: ${assistant}`;
+  return redactContacts(`[${dateStr}] user: ${user}\nassistant: ${assistant}`);
 }
 
 // ============================================================================
