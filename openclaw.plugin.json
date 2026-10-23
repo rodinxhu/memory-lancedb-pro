@@ -4,6 +4,13 @@
   "description": "Enhanced LanceDB-backed long-term memory with hybrid retrieval, multi-scope isolation, and management CLI",
   "version": "2026.2.16",
   "kind": "memory",
+  "cliCommands": [
+    {
+      "name": "memx",
+      "description": "Enhanced memory management commands (memory-lancedb-pro)",
+      "hasSubcommands": true
+    }
+  ],
   "contracts": {
     "tools": [
       "memory_recall",
@@ -624,7 +631,7 @@
     },
     "prefetch.enabled": {
       "label": "Prefetch Recall (TM3)",
-      "help": "Serve memory recall from a cache warmed after the previous turn — near-zero recall latency in ongoing conversations"
+      "help": "Serve memory recall from a cache warmed after the previous turn \u2014 near-zero recall latency in ongoing conversations"
     },
     "prefetch.similarityGate": {
       "label": "Prefetch Similarity Gate",
@@ -646,7 +653,7 @@
     },
     "sessionSearch.enabled": {
       "label": "Session Search (TM4)",
-      "help": "Verbatim transcript search — exact quotes, names, numbers, dates"
+      "help": "Verbatim transcript search \u2014 exact quotes, names, numbers, dates"
     },
     "sessionSearch.dbPath": {
       "label": "Session Index Path",
@@ -670,7 +677,7 @@
     },
     "egressGuard": {
       "label": "Memory Egress Guard",
-      "help": "Requires approval before the agent sends to a destination you have not vouched for — the main defence against prompt-injection exfiltration of recalled memories.",
+      "help": "Requires approval before the agent sends to a destination you have not vouched for \u2014 the main defence against prompt-injection exfiltration of recalled memories.",
       "enabled": {
         "label": "Enabled"
       },
