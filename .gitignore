@@ -1,1 +1,6 @@
 node_modules/
+
+# Pre-edit snapshots taken while hotfixing live. The fixes themselves are in
+# git history, so these are noise -- keep them on disk, out of the index.
+*.bak
+*.bak.*
